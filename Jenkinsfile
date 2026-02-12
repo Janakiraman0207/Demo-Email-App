@@ -1,115 +1,58 @@
 pipeline {
-    agent none
+    agent any
 
     environment {
         // Git
-        GIT_REPO = 'https://github.com/thestackly/stackly-email.git'
+        GIT_REPO = 'https://github.com/Janakiraman0207/Demo-Email-App.git'
         BRANCH   = 'main'
 
         // Deployment target
         DEPLOY_USER = 'ubuntu'
-        DEPLOY_HOST = '172.31.41.124'
-        DEPLOY_SSH  = 'deploy-ec2-key'   // Jenkins SSH credential ID
+        DEPLOY_HOST = '172.31.17.188'   // <-- Put your SLAVE PRIVATE IP here
+        DEPLOY_SSH  = 'deploy-ec2-key'
 
-        // Paths on deploy EC2
-        REMOTE_BASE = '/home/ubuntu/stackly-email'
-        FRONTEND_DIR = "${REMOTE_BASE}/frontend"
-        FASTAPI_DIR  = "${REMOTE_BASE}/fastapi_app"
-
-        // Frontend build
-        FRONTEND_BUILD   = 'dist'
-        FRONTEND_RELEASE = "/tmp/frontend_${BUILD_NUMBER}"
-
-        // Emails
-        EMAIL_RECIPIENTS = 'yarramallamaheshbabu@thestackly.com,uday@thestackly.com,janakiraman@thestackly.com,saranya@thestackly.com,sevitha@thestackly.com'
+        // Remote path
+        REMOTE_BASE = '/home/ubuntu/demo-email-app'
     }
 
     stages {
 
         stage('Checkout') {
-            agent { label 'Website' }
             steps {
-                checkout scm
+                git branch: "${BRANCH}",
+                    credentialsId: 'github-token-emailapp',
+                    url: "${GIT_REPO}"
             }
         }
 
-        stage('Build Frontend') {
-            agent { label 'Website' }
-            environment {
-                VITE_API_BASE_URL = 'http://34.208.181.79:8000'
-            }
-            steps {
-                dir('frontend') {
-                    sh '''
-                        npm install
-                        npm run build
-                    '''
-                }
-            }
-        }
-
-        stage('Deploy Backend') {
-            agent { label 'Website' }
+        stage('Deploy to EC2') {
             steps {
                 sshagent(credentials: ["${DEPLOY_SSH}"]) {
                     sh '''
                         set -e
 
-                        echo "▶ Preparing workspace SSH known_hosts"
-                        mkdir -p .ssh
-                        ssh-keyscan -t ed25519 172.31.41.124 > .ssh/known_hosts
-                        chmod 600 .ssh/known_hosts
+                        echo "Adding host to known_hosts"
+                        mkdir -p ~/.ssh
+                        ssh-keyscan -H ${DEPLOY_HOST} >> ~/.ssh/known_hosts
 
-                        SSH_OPTS="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$(pwd)/.ssh/known_hosts"
+                        echo "Syncing files to server"
+                        rsync -avz --delete \
+                          --exclude='.git' \
+                          --exclude='node_modules' \
+                          ./ ${DEPLOY_USER}@${DEPLOY_HOST}:${REMOTE_BASE}
 
-                        echo "▶ Rsync backend code"
-                        rsync -az --delete \
-                          --exclude node_modules \
-                          --exclude .venv \
-                          -e "ssh $SSH_OPTS" \
-                          ./ ubuntu@172.31.41.124:/home/ubuntu/stackly-email/
-
-                        echo "▶ Running backend setup on server"
-                        ssh $SSH_OPTS ubuntu@172.31.41.124 <<EOF
+                        echo "Running backend setup"
+                        ssh ${DEPLOY_USER}@${DEPLOY_HOST} <<EOF
                           set -e
-                          cd /home/ubuntu/stackly-email
+                          cd ${REMOTE_BASE}
 
-                          python3 -m venv .venv || true
-                          source .venv/bin/activate
+                          python3 -m venv venv || true
+                          source venv/bin/activate
                           pip install --upgrade pip
-                          pip install -r requirements.txt
-                          python manage.py migrate
-EOF
-                    '''
-                }
-            }
-        }
+                          pip install -r requirements.txt || true
 
-        stage('Deploy Frontend (Atomic)') {
-            agent { label 'Website' }
-            steps {
-                sshagent(credentials: ["${DEPLOY_SSH}"]) {
-                    sh '''
-                        set -e
-
-                        mkdir -p .ssh
-                        ssh-keyscan -t ed25519 172.31.41.124 > .ssh/known_hosts
-                        chmod 600 .ssh/known_hosts
-
-                        SSH_OPTS="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$(pwd)/.ssh/known_hosts"
-
-                        ssh $SSH_OPTS ubuntu@172.31.41.124 <<EOF
-                          set -e
-
-                          sudo rm -rf /tmp/frontend_${BUILD_NUMBER}
-                          sudo mkdir -p /tmp/frontend_${BUILD_NUMBER}
-                          sudo cp -r /home/ubuntu/stackly-email/frontend/dist/* /tmp/frontend_${BUILD_NUMBER}/
-
-                          sudo rm -rf /var/www/html/*
-                          sudo cp -r /tmp/frontend_${BUILD_NUMBER}/* /var/www/html/
-                          sudo chown -R www-data:www-data /var/www/html
-
-                          sudo systemctl reload nginx
+                          sudo systemctl restart nginx || true
+                          sudo systemctl restart fastapi || true
 EOF
                     '''
                 }
@@ -119,19 +62,10 @@ EOF
 
     post {
         success {
-            emailext(
-                subject: "✅ EmailApp Deployment SUCCESS",
-                to: "${EMAIL_RECIPIENTS}",
-                body: "Deployment succeeded at ${new Date()}"
-            )
+            echo "Deployment Successful"
         }
-
         failure {
-            emailext(
-                subject: "❌ EmailApp Deployment FAILED",
-                to: "${EMAIL_RECIPIENTS}",
-                body: "Deployment failed. Please check Jenkins logs."
-            )
+            echo "Deployment Failed"
         }
     }
 }
